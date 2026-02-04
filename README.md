@@ -1,6 +1,6 @@
 # tezos skill
 
-expert tezos blockchain development guidance for claude code and cursor.
+expert tezos blockchain development guidance for claude code & clawhub
 
 ## what it does
 
