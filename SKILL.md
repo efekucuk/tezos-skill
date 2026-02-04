@@ -1,128 +1,120 @@
 ---
 name: tezos
-description: expert tezos blockchain development guidance. covers smart contracts, security patterns, gas optimization, and fa1.2/fa2 token standards. for building on tezos l1.
+description: Expert Tezos blockchain development guidance. Provides security-first smart contract development, FA1.2/FA2 token standards, gas optimization, and production deployment patterns. Use when building Tezos L1 smart contracts or implementing token standards.
 user-invocable: true
 allowed-tools: Read, Grep, Bash(npm *), Bash(ligo *), Bash(octez-client *)
 ---
 
-# tezos blockchain development
+# Tezos Smart Contract Development Expert
 
-expert guidance for building on tezos. smart contracts, security, optimization.
+You are an expert Tezos blockchain developer with deep knowledge of smart contract security, gas optimization, and production deployment. When working with Tezos:
 
-## smart contract languages
+## Core Development Philosophy
 
-### michelson
-low-level stack-based language. use for:
-- maximum control over execution
-- gas optimization critical paths
-- direct protocol interaction
+**Security First**: Every contract must pass security validation before considering functionality complete. Always validate inputs, check authorization, and prevent reentrancy.
 
-characteristics:
-- stack-based operations
-- strongly typed
-- no loops (use recursion)
-- explicit failure handling
+**Gas Conscious**: Every operation has a cost. Default to efficient patterns - use big_map over map, views for reads, batch operations over loops.
 
-### ligo
-high-level language (cameligo, jsligo). use for:
-- most production contracts
-- faster development
-- better readability
+**Test Thoroughly**: Never deploy to mainnet without comprehensive testing on Shadownet. Simulate all operations before execution.
 
+## Smart Contract Language Selection
+
+### LIGO (Recommended for Most Projects)
+
+Use LIGO as the default choice for production contracts. It provides type safety, readability, and compiles to efficient Michelson.
+
+**CameLIGO** - Functional style, OCaml-like syntax:
 ```ligo
-// cameligo example
 type storage = {
-  counter: nat;
   owner: address;
+  balance: nat;
+  paused: bool;
 }
 
 type action =
-| Increment of nat
-| Reset
+| Transfer of address * nat
+| SetOwner of address
+| Pause
 
-let main (action, storage : action * storage) : operation list * storage =
-  match action with
-  | Increment n -> [], {storage with counter = storage.counter + n}
-  | Reset -> [], {storage with counter = 0n}
+let is_owner (addr, storage : address * storage) : bool =
+  addr = storage.owner
+
+[@entry]
+let transfer (dest, amount : address * nat) (storage : storage) : operation list * storage =
+  let () = if storage.paused then failwith "CONTRACT_PAUSED" else () in
+  let () = if amount > storage.balance then failwith "INSUFFICIENT_BALANCE" else () in
+  let contract = match Tezos.get_contract_opt dest with
+    | None -> failwith "INVALID_ADDRESS"
+    | Some c -> c
+  in
+  let op = Tezos.transaction () (amount * 1mutez) contract in
+  [op], {storage with balance = storage.balance - amount}
 ```
 
-### smartpy
-python-based. use for:
-- rapid prototyping
-- python developers
-- testing workflows
+**JsLIGO** - Imperative style, JavaScript-like syntax:
+```ligo
+type storage = {
+  owner: address,
+  counter: nat
+};
 
-## security checklist
+@entry
+const increment = (delta: nat, storage: storage): [list<operation>, storage] => {
+  if (Tezos.get_sender() != storage.owner) {
+    return failwith("NOT_OWNER");
+  }
+  return [list([]), {...storage, counter: storage.counter + delta}];
+};
+```
 
-before deploying any contract:
+### Michelson (For Gas-Critical Paths)
 
-### 1. reentrancy protection
-always update state before external calls:
+Use Michelson only when:
+- Maximum gas optimization is required
+- You need direct protocol feature access
+- Working on core infrastructure
+
+Michelson is stack-based and harder to audit. Prefer LIGO unless you have a specific reason.
+
+### SmartPy (For Rapid Prototyping)
+
+Use SmartPy for:
+- Quick proof of concepts
+- Python developers
+- Teaching/learning
+
+Not recommended for production without thorough review.
+
+## Critical Security Patterns
+
+### 1. Reentrancy Protection
+
+**ALWAYS update state before external calls:**
 
 ```ligo
-// bad
-let call_external (storage : storage) =
-  let op = external_call() in
-  let storage = {storage with called = true} in
+// ❌ VULNERABLE - state updated after external call
+[@entry]
+let withdraw (amount : tez) (storage : storage) : operation list * storage =
+  let contract = Tezos.get_contract_opt(Tezos.get_sender()) in
+  let op = Tezos.transaction () amount contract in
+  [op], {storage with withdrawn = true}
+
+// ✅ SECURE - state updated first
+[@entry]
+let withdraw (amount : tez) (storage : storage) : operation list * storage =
+  let () = if storage.withdrawn then failwith "ALREADY_WITHDRAWN" else () in
+  let storage = {storage with withdrawn = true} in
+  let contract = match Tezos.get_contract_opt(Tezos.get_sender()) with
+    | None -> failwith "INVALID_ADDRESS"
+    | Some c -> c
+  in
+  let op = Tezos.transaction () amount contract in
   [op], storage
-
-// good
-let call_external (storage : storage) =
-  let storage = {storage with called = true} in
-  let op = external_call() in
-  [op], storage
 ```
 
-### 2. integer overflow
-use appropriate types:
-- `nat` for non-negative values
-- `mutez` for currency amounts
-- check bounds explicitly
+### 2. Access Control
 
-```ligo
-let add_tokens (amount, storage : nat * storage) : storage =
-  if amount > 1000000n then
-    failwith "amount too large"
-  else
-    {storage with balance = storage.balance + amount}
-```
-
-### 3. access control
-validate sender for privileged operations:
-
-```ligo
-let check_admin (storage : storage) : unit =
-  if Tezos.get_sender() <> storage.admin then
-    failwith "not_admin"
-  else ()
-```
-
-### 4. entry point validation
-validate all parameters at entry boundaries:
-
-```ligo
-let validate_address (addr : address) : unit =
-  match Tezos.get_contract_opt(addr) with
-  | None -> failwith "invalid_address"
-  | Some _ -> ()
-```
-
-### 5. storage optimization
-minimize storage costs:
-- use `big_map` for large collections
-- pack data when possible
-- avoid nested structures
-- lazy evaluation patterns
-
-### 6. gas limits
-test operations stay within limits:
-- simulate before deployment
-- break complex ops into steps
-- use views for read-only data
-
-## common patterns
-
-### admin pattern
+**Always verify sender authorization:**
 
 ```ligo
 type storage = {
@@ -130,107 +122,69 @@ type storage = {
   data: big_map(address, nat);
 }
 
-let check_admin (storage : storage) : unit =
+let require_admin (storage : storage) : unit =
   if Tezos.get_sender() <> storage.admin then
-    failwith "not_admin"
+    failwith "NOT_ADMIN"
+  else ()
 
-let update_admin (new_admin, storage : address * storage) : operation list * storage =
-  let () = check_admin(storage) in
+[@entry]
+let update_admin (new_admin : address) (storage : storage) : operation list * storage =
+  let () = require_admin(storage) in
   [], {storage with admin = new_admin}
 ```
 
-### pausable pattern
+### 3. Input Validation
+
+**Validate all parameters at entry boundaries:**
 
 ```ligo
-type storage = {
-  paused: bool;
-  // other fields
-}
-
-let check_not_paused (storage : storage) : unit =
-  if storage.paused then
-    failwith "contract_paused"
-
-let pause (storage : storage) : operation list * storage =
-  let () = check_admin(storage) in
-  [], {storage with paused = true}
-
-let unpause (storage : storage) : operation list * storage =
-  let () = check_admin(storage) in
-  [], {storage with paused = false}
-```
-
-### token transfer pattern
-
-```ligo
-let transfer (destination, amount, storage : address * tez * storage) : operation list * storage =
-  let contract =
-    match Tezos.get_contract_opt(destination) with
-    | None -> failwith "invalid_destination"
-    | Some c -> c
+[@entry]
+let transfer (dest, amount : address * nat) (storage : storage) : operation list * storage =
+  // Validate destination
+  let () = match Tezos.get_contract_opt(dest) with
+    | None -> failwith "INVALID_DESTINATION"
+    | Some _ -> ()
   in
-  let op = Tezos.transaction () amount contract in
-  [op], storage
+  // Validate amount
+  let () = if amount = 0n then failwith "ZERO_AMOUNT" else () in
+  let () = if amount > storage.balance then failwith "INSUFFICIENT_BALANCE" else () in
+  // ... proceed with transfer
 ```
 
-### upgradeability pattern
+### 4. Integer Overflow Prevention
+
+**Use nat for non-negative values, validate bounds:**
 
 ```ligo
-type storage = {
-  logic_contract: address;
-  data: big_map(string, bytes);
-}
-
-let delegate_call (params, storage : bytes * storage) : operation list * storage =
-  let contract =
-    match Tezos.get_entrypoint_opt "%execute" storage.logic_contract with
-    | None -> failwith "logic_contract_invalid"
-    | Some c -> c
-  in
-  let op = Tezos.transaction params 0mutez contract in
-  [op], storage
+[@entry]
+let add_tokens (amount : nat) (storage : storage) : operation list * storage =
+  // Validate reasonable bounds
+  let max_amount = 1_000_000_000n in
+  let () = if amount > max_amount then failwith "AMOUNT_TOO_LARGE" else () in
+  // Safe addition with nat
+  let new_balance = storage.balance + amount in
+  [], {storage with balance = new_balance}
 ```
 
-## token standards (tzip)
+### 5. Timestamp Usage
 
-### fa1.2 (tzip-7)
-fungible tokens only. simple, gas-efficient.
-
-entry points:
-- `transfer` - move tokens between accounts
-- `approve` - allow third-party transfers
-- `getBalance` - query balance (view)
-- `getAllowance` - query approval (view)
-- `getTotalSupply` - total supply (view)
+**Use Tezos.get_now(), never system time:**
 
 ```ligo
-type transfer_param = {
-  from_: address;
-  to_: address;
-  value: nat;
-}
-
-let transfer (params, storage : transfer_param * storage) : operation list * storage =
-  let sender = Tezos.get_sender() in
-  // check balance
-  let from_balance =
-    match Big_map.find_opt params.from_ storage.ledger with
-    | None -> 0n
-    | Some b -> b
-  in
-  if from_balance < params.value then
-    failwith "insufficient_balance"
-  // update balances
-  ...
+[@entry]
+let check_deadline (storage : storage) : operation list * storage =
+  let now = Tezos.get_now() in
+  let () = if now > storage.deadline then
+    failwith "DEADLINE_PASSED"
+  else () in
+  [], storage
 ```
 
-### fa2 (tzip-12)
-multi-token standard. supports fungible + nfts.
+## FA2 Token Standard (TZIP-12)
 
-entry points:
-- `transfer` - move tokens (supports batch)
-- `balance_of` - query balances (callback pattern)
-- `update_operators` - manage transfer permissions
+FA2 is the multi-token standard supporting fungible tokens, NFTs, and hybrid contracts.
+
+### Required Entry Points
 
 ```ligo
 type transfer_destination = {
@@ -244,287 +198,471 @@ type transfer = {
   txs: transfer_destination list;
 }
 
-let transfer (transfers, storage : transfer list * storage) : operation list * storage =
-  let process_transfer (storage, transfer : storage * transfer) =
+// Entry point: transfer
+[@entry]
+let transfer (transfers : transfer list) (storage : storage) : operation list * storage =
+  let sender = Tezos.get_sender() in
+
+  let process_transfer (storage, xfer : storage * transfer) : storage =
+    // Verify sender is authorized (owner or operator)
+    let () = if xfer.from_ <> sender then
+      let key = (xfer.from_, sender) in
+      if not Big_map.mem key storage.operators then
+        failwith "FA2_NOT_OPERATOR"
+      else ()
+    else () in
+
+    // Process each transfer destination
     List.fold_left
       (fun (storage, tx) ->
-        // validate and update balances
-        validate_transfer(transfer.from_, tx, storage);
-        update_balances(transfer.from_, tx, storage))
+        // Get current balance
+        let from_balance = get_balance(xfer.from_, tx.token_id, storage) in
+
+        // Check sufficient balance
+        let () = if from_balance < tx.amount then
+          failwith "FA2_INSUFFICIENT_BALANCE"
+        else () in
+
+        // Update balances
+        let storage = set_balance(xfer.from_, tx.token_id,
+          abs(from_balance - tx.amount), storage) in
+        let to_balance = get_balance(tx.to_, tx.token_id, storage) in
+        set_balance(tx.to_, tx.token_id, to_balance + tx.amount, storage))
       storage
-      transfer.txs
+      xfer.txs
   in
+
   let storage = List.fold_left process_transfer storage transfers in
+  [], storage
+
+// Entry point: balance_of (callback pattern)
+type balance_of_request = {
+  owner: address;
+  token_id: nat;
+}
+
+type balance_of_response = {
+  request: balance_of_request;
+  balance: nat;
+}
+
+[@entry]
+let balance_of
+  (requests : balance_of_request list)
+  (callback : balance_of_response list contract)
+  (storage : storage)
+  : operation list * storage =
+
+  let responses = List.map
+    (fun (req : balance_of_request) ->
+      let balance = get_balance(req.owner, req.token_id, storage) in
+      {request = req; balance = balance})
+    requests
+  in
+  let op = Tezos.transaction responses 0mutez callback in
+  [op], storage
+
+// Entry point: update_operators
+type operator_update =
+| Add_operator of address * address * nat
+| Remove_operator of address * address * nat
+
+[@entry]
+let update_operators (updates : operator_update list) (storage : storage) : operation list * storage =
+  let sender = Tezos.get_sender() in
+
+  let process_update (storage, update : storage * operator_update) : storage =
+    match update with
+    | Add_operator (owner, operator, token_id) ->
+        let () = if sender <> owner then failwith "FA2_NOT_OWNER" else () in
+        {storage with operators = Big_map.add (owner, operator) () storage.operators}
+    | Remove_operator (owner, operator, token_id) ->
+        let () = if sender <> owner then failwith "FA2_NOT_OWNER" else () in
+        {storage with operators = Big_map.remove (owner, operator) storage.operators}
+  in
+
+  let storage = List.fold_left process_update storage updates in
   [], storage
 ```
 
-### fa2.1
-enhanced with ticket support for better composability.
+### FA2 NFT Pattern
 
-## gas optimization techniques
-
-### 1. minimize storage reads
-cache frequently accessed values:
+For NFTs, enforce amount = 1 per token_id:
 
 ```ligo
-// bad - multiple reads
-let process (storage : storage) =
-  if storage.config.enabled then
-    if storage.config.rate > 0n then
-      storage.config.rate * 2n
-
-// good - single read
-let process (storage : storage) =
-  let config = storage.config in
-  if config.enabled then
-    if config.rate > 0n then
-      config.rate * 2n
+let validate_nft_transfer (amount : nat) : unit =
+  if amount <> 1n then failwith "FA2_INVALID_AMOUNT" else ()
 ```
 
-### 2. use views for read-only operations
-no gas cost for view calls:
+### FA2 with Metadata (TZIP-16)
+
+```ligo
+type token_metadata = {
+  token_id: nat;
+  token_info: (string, bytes) map;
+}
+
+type storage = {
+  // ... other fields
+  token_metadata: (nat, token_metadata) big_map;
+  metadata: (string, bytes) big_map;
+}
+
+// Off-chain view for token metadata
+[@view]
+let token_metadata (token_id : nat) (storage : storage) : token_metadata =
+  match Big_map.find_opt token_id storage.token_metadata with
+  | None -> failwith "FA2_TOKEN_UNDEFINED"
+  | Some meta -> meta
+```
+
+## Gas Optimization Patterns
+
+### 1. Use big_map for Large Collections
+
+```ligo
+// ❌ Expensive - entire map in context
+type storage = {
+  balances: (address, nat) map;
+}
+
+// ✅ Efficient - only accessed entries in context
+type storage = {
+  balances: (address, nat) big_map;
+}
+```
+
+### 2. Use Views for Read-Only Operations
+
+Views have no gas cost when called off-chain:
 
 ```ligo
 [@view]
-let get_balance (owner, storage : address * storage) : nat =
-  match Big_map.find_opt owner storage.ledger with
+let get_balance (owner : address) (storage : storage) : nat =
+  match Big_map.find_opt owner storage.balances with
   | None -> 0n
   | Some balance -> balance
 ```
 
-### 3. batch operations
-combine multiple ops:
+### 3. Batch Operations
 
 ```ligo
-// instead of multiple calls
-transfer(addr1, 100n);
-transfer(addr2, 200n);
-transfer(addr3, 300n);
+// ❌ Expensive - multiple transactions
+transfer(alice, 100n);
+transfer(bob, 200n);
+transfer(charlie, 300n);
 
-// batch
-batch_transfer([
-  {to_: addr1, amount: 100n};
-  {to_: addr2, amount: 200n};
-  {to_: addr3, amount: 300n};
-])
-```
-
-### 4. optimize data structures
-use appropriate collections:
-
-```ligo
-// bad - map in storage (expensive)
-type storage = {
-  users: (address, user_data) map;
+// ✅ Efficient - single batched operation
+type batch_transfer = {
+  recipients: (address * nat) list;
 }
 
-// good - big_map in storage (efficient)
-type storage = {
-  users: (address, user_data) big_map;
-}
+[@entry]
+let batch_transfer (batch : batch_transfer) (storage : storage) : operation list * storage =
+  List.fold_left
+    (fun (storage, (recipient, amount)) ->
+      process_single_transfer(recipient, amount, storage))
+    storage
+    batch.recipients
 ```
 
-### 5. pack data efficiently
+### 4. Cache Storage Reads
 
 ```ligo
-let store_metadata (data, storage : metadata * storage) : storage =
-  let packed = Bytes.pack(data) in
-  {storage with metadata = packed}
+// ❌ Multiple reads of same value
+[@entry]
+let process (storage : storage) : operation list * storage =
+  if storage.config.enabled then
+    if storage.config.rate > 0n then
+      let result = storage.config.rate * storage.config.multiplier in
+      // ... storage.config read 4 times
+
+// ✅ Single read, cached locally
+[@entry]
+let process (storage : storage) : operation list * storage =
+  let config = storage.config in
+  if config.enabled then
+    if config.rate > 0n then
+      let result = config.rate * config.multiplier in
+      // ... config accessed from local variable
 ```
 
-## networks
+### 5. Optimize Data Packing
 
-### mainnet
-production deployments only. costs real xtz.
-- rpc: `https://mainnet.api.tez.ie`
-- explorer: https://tzkt.io
-- always test on shadownet first
+```ligo
+// Store complex data efficiently
+[@entry]
+let store_data (data : complex_type) (storage : storage) : operation list * storage =
+  let packed = Bytes.pack data in
+  {storage with packed_data = Big_map.add key packed storage.packed_data}
 
-### shadownet
-primary testnet. use for all development.
-- rpc: `https://rpc.shadownet.teztnets.com`
-- faucet: https://faucet.shadownet.teztnets.com
-- explorer: https://shadownet.tzkt.io
-- similar to mainnet, long-running
+[@view]
+let retrieve_data (key : string) (storage : storage) : complex_type =
+  match Big_map.find_opt key storage.packed_data with
+  | None -> failwith "NOT_FOUND"
+  | Some packed ->
+      match Bytes.unpack packed with
+      | None -> failwith "UNPACK_FAILED"
+      | Some data -> data
+```
 
-### ghostnet
-legacy testnet. being deprecated.
-- migrate existing projects to shadownet
-- rpc: `https://rpc.ghostnet.teztnets.com`
+## Common Production Patterns
 
-## testing strategy
+### Admin Pattern with Transfer
 
-### 1. unit tests
-test individual entry points:
+```ligo
+type storage = {
+  admin: address;
+  pending_admin: address option;
+  // ... other fields
+}
+
+[@entry]
+let propose_admin (new_admin : address) (storage : storage) : operation list * storage =
+  let () = if Tezos.get_sender() <> storage.admin then
+    failwith "NOT_ADMIN" else () in
+  [], {storage with pending_admin = Some new_admin}
+
+[@entry]
+let accept_admin (storage : storage) : operation list * storage =
+  match storage.pending_admin with
+  | None -> failwith "NO_PENDING_ADMIN", storage
+  | Some pending ->
+      let () = if Tezos.get_sender() <> pending then
+        failwith "NOT_PENDING_ADMIN" else () in
+      [], {storage with admin = pending; pending_admin = None}
+```
+
+### Pausable Pattern
+
+```ligo
+type storage = {
+  paused: bool;
+  admin: address;
+  // ... other fields
+}
+
+let require_not_paused (storage : storage) : unit =
+  if storage.paused then failwith "CONTRACT_PAUSED" else ()
+
+[@entry]
+let pause (storage : storage) : operation list * storage =
+  let () = if Tezos.get_sender() <> storage.admin then
+    failwith "NOT_ADMIN" else () in
+  [], {storage with paused = true}
+
+[@entry]
+let unpause (storage : storage) : operation list * storage =
+  let () = if Tezos.get_sender() <> storage.admin then
+    failwith "NOT_ADMIN" else () in
+  [], {storage with paused = false}
+```
+
+### Rate Limiting Pattern
+
+```ligo
+type storage = {
+  last_action: (address, timestamp) big_map;
+  cooldown_period: int;
+  // ... other fields
+}
+
+let check_rate_limit (sender : address) (storage : storage) : unit =
+  match Big_map.find_opt sender storage.last_action with
+  | None -> ()
+  | Some last_time ->
+      let now = Tezos.get_now() in
+      let elapsed = now - last_time in
+      if elapsed < storage.cooldown_period then
+        failwith "RATE_LIMIT_EXCEEDED"
+      else ()
+
+[@entry]
+let rate_limited_action (storage : storage) : operation list * storage =
+  let sender = Tezos.get_sender() in
+  let () = check_rate_limit(sender, storage) in
+  let storage = {storage with
+    last_action = Big_map.update sender (Some (Tezos.get_now())) storage.last_action
+  } in
+  // ... perform action
+  [], storage
+```
+
+## Testing Strategy
+
+### 1. Write Tests First
+
+Before implementing, write test cases:
 
 ```bash
-ligo run test contract_test.mligo
+# tests/contract_test.mligo
+let test_transfer_success =
+  let initial_storage = {
+    balances = Big_map.literal [(alice, 1000n); (bob, 0n)];
+    admin = admin_address;
+  } in
+  let (ops, storage) = transfer(bob, 100n, initial_storage) in
+  assert (Big_map.find alice storage.balances = 900n);
+  assert (Big_map.find bob storage.balances = 100n)
+
+let test_transfer_insufficient_balance =
+  let initial_storage = {
+    balances = Big_map.literal [(alice, 50n)];
+    admin = admin_address;
+  } in
+  // Should fail with INSUFFICIENT_BALANCE
+  Test.expect_failure (fun () -> transfer(bob, 100n, initial_storage))
 ```
 
-test edge cases:
-- zero amounts
-- maximum values
-- unauthorized access
-- invalid parameters
+### 2. Test Security Boundaries
 
-### 2. integration tests
-test contract interactions:
+```bash
+# Test unauthorized access
+let test_admin_only_fails =
+  Test.set_source(non_admin);
+  Test.expect_failure (fun () -> pause(storage))
+
+# Test reentrancy protection
+let test_double_withdrawal_fails =
+  withdraw(amount, storage);
+  Test.expect_failure (fun () -> withdraw(amount, storage))
+
+# Test overflow conditions
+let test_max_amount =
+  let max_nat = 1000000000n in
+  Test.expect_failure (fun () -> add_tokens(max_nat + 1n, storage))
+```
+
+### 3. Simulate on Shadownet
+
+Always simulate before real transactions:
 
 ```bash
 octez-client \
   --endpoint https://rpc.shadownet.teztnets.com \
-  transfer 0 from alice to contract \
-  --entrypoint mint \
-  --arg '{"amount": 1000}'
-```
-
-### 3. simulation
-dry-run before committing:
-
-```bash
-octez-client \
-  --endpoint https://rpc.shadownet.teztnets.com \
-  transfer 0 from alice to contract \
+  transfer 0 from alice to my_contract \
   --entrypoint transfer \
-  --arg '{"from": "tz1...", "to": "tz2...", "amount": 100}' \
-  --dry-run
+  --arg '{"dest": "tz1...", "amount": 100}' \
+  --dry-run \
+  --gas-limit 100000
 ```
 
-### 4. security audit
-before mainnet:
-- professional audit for high-value contracts
-- peer review
-- bug bounty program
-- formal verification if critical
+## Deployment Workflow
 
-## common gotchas
+### Step 1: Compile and Verify
 
-### amounts are in mutez
-always work in mutez internally:
-
-```ligo
-// bad
-let amount = 1  // is this xtz or mutez?
-
-// good
-let amount = 1_000_000n  // 1 xtz = 1M mutez (explicit)
-```
-
-### timestamps are block time
-use `Tezos.get_now()`, not system time:
-
-```ligo
-let check_deadline (storage : storage) : unit =
-  if Tezos.get_now() > storage.deadline then
-    failwith "deadline_passed"
-```
-
-### no native randomness
-use commit-reveal or oracles:
-
-```ligo
-// commit phase
-let commit (hash, storage : bytes * storage) : storage =
-  {storage with commitment = hash}
-
-// reveal phase
-let reveal (value, storage : nat * storage) : storage =
-  let hash = Crypto.sha256(Bytes.pack(value)) in
-  if hash <> storage.commitment then
-    failwith "invalid_reveal"
-  else
-    {storage with random = value}
-```
-
-### implicit vs originated accounts
-- tz1/tz2/tz3 - implicit accounts (wallets)
-- KT1 - originated accounts (contracts)
-
-### entry point names are case-sensitive
-
-```ligo
-// these are different
-[@entry] let Transfer = ...
-[@entry] let transfer = ...
-```
-
-## deployment workflow
-
-1. write contract in ligo
-2. compile to michelson: `ligo compile contract contract.mligo`
-3. test thoroughly on shadownet
-4. simulate operations: `octez-client run script ... --trace-stack`
-5. originate on shadownet: `octez-client originate contract ...`
-6. integration testing
-7. security audit
-8. deploy to mainnet
-
-## useful commands
-
-### compile contract
 ```bash
-ligo compile contract contract.mligo
+# Compile contract
+ligo compile contract contract.mligo > contract.tz
+
+# Compile initial storage
+ligo compile storage contract.mligo '{
+  admin = ("tz1..." : address);
+  balance = 0n;
+  paused = false;
+}' > storage.tz
+
+# Verify Michelson output
+cat contract.tz
 ```
 
-### compile storage
-```bash
-ligo compile storage contract.mligo 'initial_storage'
-```
+### Step 2: Deploy to Shadownet
 
-### run off-chain test
 ```bash
-ligo run test contract_test.mligo
-```
-
-### originate contract
-```bash
-octez-client originate contract my_contract \
+# Originate on testnet
+octez-client \
+  --endpoint https://rpc.shadownet.teztnets.com \
+  originate contract my_contract \
   transferring 0 from alice \
   running contract.tz \
-  --init '0' \
-  --burn-cap 0.5
+  --init "$(cat storage.tz)" \
+  --burn-cap 10.0 \
+  --force
+
+# Note the KT1... address
 ```
 
-### call contract
+### Step 3: Integration Testing
+
 ```bash
+# Test all entry points
 octez-client transfer 0 from alice to my_contract \
-  --entrypoint increment \
-  --arg '5'
-```
+  --entrypoint transfer \
+  --arg '{"dest": "tz1...", "amount": 100}'
 
-### get storage
-```bash
+# Verify storage state
 octez-client get contract storage for my_contract
+
+# Check operations
+curl https://api.shadownet.tzkt.io/v1/contracts/KT1.../operations
 ```
 
-## resources
+### Step 4: Security Review
 
-official docs:
-- tezos: https://docs.tezos.com
-- ligo: https://ligolang.org
-- smartpy: https://smartpy.io
-- opentezos: https://opentezos.com
+Before mainnet deployment:
+- [ ] All entry points tested
+- [ ] Access control verified
+- [ ] Reentrancy protection confirmed
+- [ ] Input validation complete
+- [ ] Gas optimization reviewed
+- [ ] Professional audit (for high-value contracts)
+- [ ] Bug bounty considered
 
-explorers:
-- tzkt: https://tzkt.io
-- better call dev: https://better-call.dev
+### Step 5: Mainnet Deployment
 
-tools:
-- teztnets registry: https://teztnets.com
-- faucet: https://faucet.shadownet.teztnets.com
+```bash
+# Deploy to mainnet (after thorough testing!)
+octez-client \
+  --endpoint https://mainnet.api.tez.ie \
+  originate contract my_contract \
+  transferring 0 from deployer \
+  running contract.tz \
+  --init "$(cat storage.tz)" \
+  --burn-cap 10.0
 
-standards:
-- fa1.2: https://gitlab.com/tezos/tzip/-/blob/master/proposals/tzip-7/tzip-7.md
-- fa2: https://gitlab.com/tezos/tzip/-/blob/master/proposals/tzip-12/tzip-12.md
+# Verify on explorer
+open https://tzkt.io/KT1...
+```
 
-## when to use this skill
+## Networks
 
-invoke this skill when:
-- building tezos smart contracts
-- implementing token standards
-- optimizing gas usage
-- debugging contract issues
-- setting up testing infrastructure
-- deploying to mainnet/testnet
+### Mainnet (Production)
+- RPC: `https://mainnet.api.tez.ie`
+- Explorer: https://tzkt.io
+- Use for: Production deployments only
+- Cost: Real XTZ
 
-always prioritize security over development speed.
+### Shadownet (Primary Testnet - Recommended)
+- RPC: `https://rpc.shadownet.teztnets.com`
+- Faucet: https://faucet.shadownet.teztnets.com
+- Explorer: https://shadownet.tzkt.io
+- Use for: All development and testing
+- Status: Long-running, similar to mainnet
+
+### Ghostnet (Legacy - Deprecated)
+- RPC: `https://rpc.ghostnet.teztnets.com`
+- Status: Being phased out
+- Action: Migrate projects to Shadownet
+
+**Always test thoroughly on Shadownet before deploying to mainnet.**
+
+## When to Invoke This Skill
+
+Use this skill when:
+- Building Tezos smart contracts
+- Implementing FA1.2 or FA2 token standards
+- Optimizing gas usage
+- Debugging contract issues
+- Planning production deployment
+- Reviewing contract security
+
+## Resources
+
+- **Tezos Docs**: https://docs.tezos.com
+- **LIGO**: https://ligolang.org
+- **OpenTezos**: https://opentezos.com
+- **TzKT Explorer**: https://tzkt.io
+- **Token Standards**: https://gitlab.com/tezos/tzip
+- **Testnet Registry**: https://teztnets.com
+
+Remember: Security first, test thoroughly, deploy confidently.
